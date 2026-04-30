@@ -1,4 +1,4 @@
-IMAGE   ?= ghcr.io/artur-matkowski/frigate-gotify-bridge
+IMAGE   ?= ghcr.io/artur-matkowski/frigate-mqtt-bridge
 VERSION ?= v1
 GH_USER ?= artur-matkowski
 

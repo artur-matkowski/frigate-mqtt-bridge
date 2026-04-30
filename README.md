@@ -185,12 +185,12 @@ curl -X POST "http://gotify/message?token=<GOTIFY_TOKEN>" -F title=Test -F messa
 
 ## Step 5 — Deploy the bridge on VM B (Gotify host)
 
-The bridge is a small Python service published as a container image at `ghcr.io/artur-matkowski/frigate-gotify-bridge`. You build it once on a dev box, push to ghcr.io, then pull it on the target VM. The same image and compose work on either VM — only `.env` and the network name differ.
+The bridge is a small Python service published as a container image at `ghcr.io/artur-matkowski/frigate-mqtt-bridge`. You build it once on a dev box, push to ghcr.io, then pull it on the target VM. The same image and compose work on either VM — only `.env` and the network name differ.
 
 ### Project layout (this repo)
 
 ```
-frigate-gotify/
+frigate-mqtt-bridge/
 ├── src/bridge/__main__.py    # bridge logic (rising-edge, 30s cooldown, restart-safe seed)
 ├── Dockerfile                # multi-stage, non-root user
 ├── requirements.txt          # paho-mqtt==2.*, requests==2.*
@@ -212,17 +212,17 @@ make login                  # docker login ghcr.io using the gh CLI's token
 make release VERSION=v1     # build :v1 + :latest, push both to ghcr.io
 ```
 
-After a successful push, the image is at `ghcr.io/artur-matkowski/frigate-gotify-bridge:v1` (and `:latest`). It will appear under **GitHub → your profile → Packages**. By default, ghcr packages are private — link it to a repo (the `org.opencontainers.image.source` label points at one) and toggle visibility on the package page if you want anonymous pulls.
+After a successful push, the image is at `ghcr.io/artur-matkowski/frigate-mqtt-bridge:v1` (and `:latest`). It will appear under **GitHub → your profile → Packages**. By default, ghcr packages are private — link it to a repo (the `org.opencontainers.image.source` label points at one) and toggle visibility on the package page if you want anonymous pulls.
 
 ### 5b. Create the stack in Portainer (VM B)
 
-**Stacks → Add stack → Web editor**, name `frigate-gotify-bridge`. Paste the contents of this repo's `docker-compose.yml`:
+**Stacks → Add stack → Web editor**, name `frigate-mqtt-bridge`. Paste the contents of this repo's `docker-compose.yml`:
 
 ```yaml
 services:
   bridge:
-    image: ghcr.io/artur-matkowski/frigate-gotify-bridge:latest
-    container_name: frigate-gotify-bridge
+    image: ghcr.io/artur-matkowski/frigate-mqtt-bridge:latest
+    container_name: frigate-mqtt-bridge
     restart: unless-stopped
     env_file: .env
     networks:
@@ -251,7 +251,7 @@ In the Portainer stack form, scroll to **Environment variables** and add the val
 
 **Private package?** If you didn't make the ghcr package public, the VM needs a one-time `docker login ghcr.io -u artur-matkowski` with a `read:packages`-scoped PAT. Public packages: nothing to set up.
 
-Click **Deploy the stack**. **Containers → frigate-gotify-bridge → Logs** should show:
+Click **Deploy the stack**. **Containers → frigate-mqtt-bridge → Logs** should show:
 ```
 ... INFO subscribed frigate/+/gate_open
 ... INFO subscribed frigate/+/gate_closed
@@ -260,8 +260,8 @@ Click **Deploy the stack**. **Containers → frigate-gotify-bridge → Logs** sh
 ### 5c. Or deploy via SSH on VM B (no Portainer)
 
 ```
-sudo mkdir -p /opt/stacks/frigate-gotify-bridge
-cd /opt/stacks/frigate-gotify-bridge
+sudo mkdir -p /opt/stacks/frigate-mqtt-bridge
+cd /opt/stacks/frigate-mqtt-bridge
 # place docker-compose.yml and .env here (copy from this repo)
 docker compose pull
 docker compose up -d
@@ -342,7 +342,7 @@ After a fresh bridge restart, the very first message for a `(camera,label)` pair
 
 1. **Mosquitto reachable from VM B** — `./scripts/sniff.sh 'test/ping'` in one terminal, then in another: `./scripts/spoof.sh ping test 1` (which publishes to `frigate/test/ping` — close enough for a connectivity check) or just `mosquitto_pub -h <FRIGATE_HOST> -p 1883 -u bridge -P <BRIDGE_MQTT_PASS> -t test/ping -m hi`. The sniff terminal should print the message.
 
-2. **Bridge subscribed** — VM B → **Containers → frigate-gotify-bridge → Logs**. See `subscribed frigate/+/gate_open` and `subscribed frigate/+/gate_closed`.
+2. **Bridge subscribed** — VM B → **Containers → frigate-mqtt-bridge → Logs**. See `subscribed frigate/+/gate_open` and `subscribed frigate/+/gate_closed`.
 
 3. **Synthetic event** — `./scripts/spoof-cycle.sh gate_open Podjazd`. First `1` after a fresh bridge becomes the seed (no push); subsequent `0`-then-`1` should fire. If the bridge has been running for a while and already seeded, the very first `1` should fire. Phone push within ~1 s; bridge logs `pushed Brama otwarta for Podjazd`.
 
@@ -350,7 +350,7 @@ After a fresh bridge restart, the very first message for a `(camera,label)` pair
 
 5. **Real event** — physically move the gate, with `./scripts/sniff-frigate.sh` running in another terminal. Confirm the underlying topic traffic *and* the phone push.
 
-6. **Restart safety** — **Containers → frigate-gotify-bridge → Restart**. If the gate is currently open, no spurious push fires; the bridge logs `seeded Podjazd/gate_open=1 (no push on first message)`.
+6. **Restart safety** — **Containers → frigate-mqtt-bridge → Restart**. If the gate is currently open, no spurious push fires; the bridge logs `seeded Podjazd/gate_open=1 (no push on first message)`.
 
 ---
 
@@ -364,7 +364,7 @@ On VM A (Frigate host):
 - Host firewall: TCP 1883 from `GOTIFY_HOST`.
 
 On VM B (Gotify host):
-- Portainer stack: `frigate-gotify-bridge`, image `ghcr.io/artur-matkowski/frigate-gotify-bridge:latest`, attached to the Gotify network.
+- Portainer stack: `frigate-mqtt-bridge`, image `ghcr.io/artur-matkowski/frigate-mqtt-bridge:latest`, attached to the Gotify network.
 - `.env` (or Portainer stack env vars) with MQTT host/creds and Gotify URL/token.
 - Gotify Application "Frigate" — token referenced from `.env`.
 

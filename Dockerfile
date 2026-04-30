@@ -4,7 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 FROM python:3.12-slim AS runtime
-LABEL org.opencontainers.image.source="https://github.com/artur-matkowski/frigate-gotify"
+LABEL org.opencontainers.image.source="https://github.com/artur-matkowski/frigate-mqtt-bridge"
 LABEL org.opencontainers.image.description="Frigate -> Gotify MQTT bridge"
 LABEL org.opencontainers.image.licenses="MIT"
 

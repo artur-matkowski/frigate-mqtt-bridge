@@ -93,7 +93,7 @@ def on_message(_client, _userdata, msg):
 
 def main() -> None:
     client = mqtt.Client(
-        client_id="frigate-gotify-bridge",
+        client_id="frigate-mqtt-bridge",
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
     )
     client.username_pw_set(MQTT_USER, MQTT_PASS)

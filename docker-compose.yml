@@ -9,8 +9,8 @@
 #     network = whatever shares with Mosquitto
 services:
   bridge:
-    image: ghcr.io/artur-matkowski/frigate-gotify-bridge:latest
-    container_name: frigate-gotify-bridge
+    image: ghcr.io/artur-matkowski/frigate-mqtt-bridge:latest
+    container_name: frigate-mqtt-bridge
     restart: unless-stopped
     env_file: .env
     networks:
