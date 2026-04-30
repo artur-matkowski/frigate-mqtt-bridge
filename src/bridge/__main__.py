@@ -1,9 +1,12 @@
 import logging
 import os
+import re
 import sys
-import time
+from collections import defaultdict
+from dataclasses import dataclass
 
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import topic_matches_sub
 import requests
 
 MQTT_HOST    = os.environ["MQTT_HOST"]
@@ -14,84 +17,139 @@ GOTIFY_URL   = os.environ["GOTIFY_URL"].rstrip("/")
 GOTIFY_TOKEN = os.environ["GOTIFY_TOKEN"]
 GOTIFY_PRIO  = int(os.environ.get("GOTIFY_PRIORITY", "5"))
 
-COOLDOWN_S = 30.0
-
-LABELS = {
-    "gate_open":   ("Brama", "otwarta"),
-    "gate_closed": ("Brama", "zamknięta"),
-}
-
-# Per-key state. `seen_keys` tracks which (camera,label) pairs we've received
-# at least one message for — the *first* message after startup only seeds
-# state, it never fires a push, so a still-open gate at restart stays quiet.
-last_count: dict[str, int] = {}
-last_push_at: dict[str, float] = {}
-seen_keys: set[str] = set()
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
 
 
-def push(title: str, message: str) -> None:
+@dataclass
+class Forward:
+    n: int
+    topics: list[str]
+    values: set[str] | None
+    title: str
+    message: str
+    priority: int
+
+
+class _SafeDict(dict):
+    def __missing__(self, key):
+        return ""
+
+
+_SLOT_RE = re.compile(r"^FORWARD_(\d+)_([A-Z]+)$")
+
+
+def parse_forwards() -> list[Forward]:
+    raw: dict[int, dict[str, str]] = defaultdict(dict)
+    for k, v in os.environ.items():
+        m = _SLOT_RE.match(k)
+        if m:
+            raw[int(m.group(1))][m.group(2)] = v
+
+    forwards: list[Forward] = []
+    for n in sorted(raw):
+        slot = raw[n]
+        topic_raw = slot.get("TOPIC", "").strip()
+        if not topic_raw:
+            log.warning("FORWARD_%d_* defined without _TOPIC — skipping", n)
+            continue
+        topics = [t.strip() for t in topic_raw.split(",") if t.strip()]
+        values_raw = slot.get("VALUES", "").strip()
+        values = (
+            {v.strip() for v in values_raw.split(",") if v.strip()}
+            if values_raw
+            else None
+        )
+        priority = int(slot["PRIORITY"]) if "PRIORITY" in slot else GOTIFY_PRIO
+        forwards.append(
+            Forward(
+                n=n,
+                topics=topics,
+                values=values,
+                title=slot.get("TITLE", "{topic}"),
+                message=slot.get("MESSAGE", "{payload}"),
+                priority=priority,
+            )
+        )
+    return forwards
+
+
+FORWARDS = parse_forwards()
+
+
+def push(title: str, message: str, priority: int) -> None:
     r = requests.post(
         f"{GOTIFY_URL}/message",
         params={"token": GOTIFY_TOKEN},
-        json={"title": title, "message": message, "priority": GOTIFY_PRIO},
+        json={"title": title, "message": message, "priority": priority},
         timeout=5,
     )
     r.raise_for_status()
+
+
+def render(template: str, topic: str, payload: str) -> str:
+    parts = topic.split("/")
+    camera = parts[1] if len(parts) >= 2 else ""
+    return template.format_map(_SafeDict(topic=topic, payload=payload, camera=camera))
 
 
 def on_connect(client, _userdata, _flags, rc, *_):
     if rc != 0:
         log.error("mqtt connect failed rc=%s", rc)
         sys.exit(1)
-    for label in LABELS:
-        client.subscribe(f"frigate/+/{label}", qos=0)
-        log.info("subscribed frigate/+/%s", label)
+    seen: set[str] = set()
+    for fwd in FORWARDS:
+        for t in fwd.topics:
+            if t in seen:
+                continue
+            seen.add(t)
+            client.subscribe(t, qos=0)
+            log.info("subscribed %s", t)
 
 
 def on_message(_client, _userdata, msg):
-    try:
-        count = int(msg.payload.decode().strip())
-    except ValueError:
-        return
-    parts = msg.topic.split("/")
-    if len(parts) != 3:
-        return
-    _, camera, label = parts
-    if label not in LABELS:
-        return
-    key = f"{camera}/{label}"
-
-    if key not in seen_keys:
-        seen_keys.add(key)
-        last_count[key] = count
-        log.info("seeded %s=%d (no push on first message)", key, count)
-        return
-
-    prev = last_count.get(key, 0)
-    last_count[key] = count
-    if not (prev == 0 and count >= 1):
-        return
-
-    now = time.monotonic()
-    elapsed = now - last_push_at.get(key, 0.0)
-    if elapsed < COOLDOWN_S:
-        log.info("cooldown suppressed %s for %s (%.1fs left)",
-                 label, camera, COOLDOWN_S - elapsed)
-        return
-
-    title, body = LABELS[label]
-    try:
-        push(title, f"{body} ({camera})")
-        last_push_at[key] = now
-        log.info("pushed %s %s for %s", title, body, camera)
-    except Exception as e:
-        log.exception("gotify push failed: %s", e)
+    payload = msg.payload.decode(errors="replace").strip()
+    fired = 0
+    for fwd in FORWARDS:
+        if not any(topic_matches_sub(t, msg.topic) for t in fwd.topics):
+            continue
+        if fwd.values is not None and payload not in fwd.values:
+            log.info(
+                "FORWARD_%d dropped (value filter): topic=%s payload=%r",
+                fwd.n, msg.topic, payload,
+            )
+            continue
+        title = render(fwd.title, msg.topic, payload)
+        message = render(fwd.message, msg.topic, payload)
+        try:
+            push(title, message, fwd.priority)
+            log.info(
+                "FORWARD_%d pushed: title=%r message=%r (topic=%s)",
+                fwd.n, title, message, msg.topic,
+            )
+            fired += 1
+        except Exception as e:
+            log.exception("FORWARD_%d gotify push failed: %s", fwd.n, e)
+    if fired == 0:
+        log.debug("no forward matched topic=%s", msg.topic)
 
 
 def main() -> None:
+    if not FORWARDS:
+        log.error("no FORWARD_<N>_TOPIC env vars set — nothing to forward")
+        sys.exit(1)
+    log.info("parsed %d forwards", len(FORWARDS))
+    for fwd in FORWARDS:
+        log.info(
+            "  FORWARD_%d topics=%s values=%s title=%r message=%r priority=%d",
+            fwd.n,
+            fwd.topics,
+            sorted(fwd.values) if fwd.values is not None else "*",
+            fwd.title,
+            fwd.message,
+            fwd.priority,
+        )
+
     client = mqtt.Client(
         client_id="frigate-mqtt-bridge",
         callback_api_version=mqtt.CallbackAPIVersion.VERSION2,

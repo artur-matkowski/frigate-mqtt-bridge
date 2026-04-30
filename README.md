@@ -16,12 +16,11 @@ This guide is **documentation only** — nothing runs against your hosts from he
 - The bridge is a small Python service shipped as a pre-built image on `ghcr.io` — no custom build on the target VM, no bind-mounted script.
 
 ### Scope of v1
-- Plain-text push: title `Brama` + body `otwarta` / `zamknięta`.
-- Triggered on the rising edge of each label's per-camera count (`0 → ≥1`).
-- 30 s cooldown per `(camera,label)` to suppress retriggers.
-- "First message after restart" only seeds state — it never fires (so a still-open gate stays quiet on bridge restart).
-- One Gotify Application reused for all gate events.
-- Snapshots, TLS, multi-camera fan-out, structured logs → see "Later".
+- Plain-text push: title and body are templates per forward, with `{topic}` / `{payload}` / `{camera}` substitution.
+- Pure pass-through: every MQTT message that matches a configured forward fires a Gotify push. No edge detection, no cooldown.
+- Forwards are configured via `FORWARD_<N>_*` env vars — multiple slots, each subscribing to one or more topic filters, with optional payload-value filtering and per-slot priority.
+- One Gotify Application reused for all forwarded events.
+- Snapshots, TLS, structured logs, retained-message handling → see "Later".
 
 ---
 
@@ -39,7 +38,7 @@ If you'd rather avoid SSH for `mosquitto.conf` too, put it in a git repo and use
 
 ## Prerequisites checklist
 
-- [ ] Frigate UI shows `gate_open` / `gate_closed` objects firing (custom labels are in `objects.track` and the labelmap).
+- [ ] Frigate is publishing the topics you intend to forward (e.g. classification topics like `frigate/<camera>/classification/<label>`, or per-object topics like `frigate/<camera>/<label>`). Confirm with `./scripts/sniff-frigate.sh` before configuring forwards.
 - [ ] Portainer is reachable on both VMs and you can create stacks.
 - [ ] You know the LAN IPs — call them `FRIGATE_HOST` and `GOTIFY_HOST` below.
 - [ ] You can `ssh` (or SFTP) into both VMs to drop ~3 small files.
@@ -157,17 +156,19 @@ mosquitto_sub -h <FRIGATE_HOST> -p 1883 -u bridge -P <BRIDGE_MQTT_PASS> -v -t fr
 ```
 Disable "Auto-remove" so logs persist; **Deploy**. Open **Logs**, then walk past the gate.
 
-You should see:
+You should see your real Frigate topics, e.g.:
 ```
-frigate/<camera>/gate_open 1
-frigate/<camera>/gate_open 0
-frigate/<camera>/gate_closed 1
+frigate/Podjazd/classification/Brama otwarta 1
+frigate/Podjazd/classification/Brama zamknieta 1
+frigate/Podjazd/<some_label> 1
 ```
-If `frigate/<camera>/all` is the only thing you see, your custom labels aren't actually in `objects.track` yet — fix that before proceeding. If you see no `frigate/...` topics at all, Frigate didn't connect to MQTT — re-check Step 2.
+If you only see `frigate/<camera>/all` and no per-label or per-classification topics, your detectors aren't firing the way you expect — fix that before proceeding. If you see no `frigate/...` topics at all, Frigate didn't connect to MQTT — re-check Step 2.
+
+**Write down the exact topic strings you see** — they go straight into `FORWARD_<N>_TOPIC` in Step 5. Topic segments may legitimately contain spaces (Frigate classification labels often do).
 
 Stop and remove the smoke-test container when done.
 
-Reference: <https://docs.frigate.video/integrations/mqtt/> — `frigate/<camera>/<object>` publishes the count of currently-tracked objects of that label.
+Reference: <https://docs.frigate.video/integrations/mqtt/>.
 
 ---
 
@@ -191,7 +192,7 @@ The bridge is a small Python service published as a container image at `ghcr.io/
 
 ```
 frigate-mqtt-bridge/
-├── src/bridge/__main__.py    # bridge logic (rising-edge, 30s cooldown, restart-safe seed)
+├── src/bridge/__main__.py    # bridge logic (env-driven topic→Gotify forwards)
 ├── Dockerfile                # multi-stage, non-root user
 ├── requirements.txt          # paho-mqtt==2.*, requests==2.*
 ├── docker-compose.yml        # registry-only, paste-into-Portainer ready
@@ -232,16 +233,34 @@ services:
       GOTIFY_URL: http://<GOTIFY_HOST>:<GOTIFY_PORT>
       GOTIFY_TOKEN: <GOTIFY_TOKEN>
       GOTIFY_PRIORITY: "5"
+      # One forward slot per (set of) topic filter(s). N can be any integer.
+      FORWARD_1_TOPIC: "frigate/+/classification/Brama otwarta,frigate/+/classification/Brama zamknieta"
+      FORWARD_1_TITLE: "Brama"
+      FORWARD_1_MESSAGE: "{payload} ({camera})"
+      # Optional value filter — only fires when payload is exactly "1":
+      # FORWARD_2_TOPIC: "frigate/+/gate_open"
+      # FORWARD_2_TITLE: "Brama"
+      # FORWARD_2_MESSAGE: "otwarta"
+      # FORWARD_2_VALUES: "1"
+      # FORWARD_2_PRIORITY: "5"
 ```
 
 Substitute the placeholders directly in the YAML before deploying. All connections are over LAN IPs — no Docker hostnames, no shared networks — so Compose's auto-created default network is enough and no `networks:` block is needed.
+
+Forward semantics:
+- `FORWARD_<N>_TOPIC` is comma-separated — one slot can subscribe to several filters (`+`/`#` wildcards allowed; spaces in segments are fine).
+- `FORWARD_<N>_VALUES` (optional, comma-separated) restricts forwarding to those exact payloads (after `strip()`). Unset = forward every payload.
+- `FORWARD_<N>_TITLE` / `FORWARD_<N>_MESSAGE` support `{topic}`, `{payload}`, `{camera}` placeholders. Defaults: `{topic}` and `{payload}`.
+- `FORWARD_<N>_PRIORITY` falls back to `GOTIFY_PRIORITY`.
 
 **Private package?** If you didn't make the ghcr package public, the VM needs a one-time `docker login ghcr.io -u artur-matkowski` with a `read:packages`-scoped PAT. Public packages: nothing to set up.
 
 Click **Deploy the stack**. **Containers → frigate-mqtt-bridge → Logs** should show:
 ```
-... INFO subscribed frigate/+/gate_open
-... INFO subscribed frigate/+/gate_closed
+... INFO parsed 1 forwards
+... INFO   FORWARD_1 topics=['frigate/+/classification/Brama otwarta', 'frigate/+/classification/Brama zamknieta'] values=* title='Brama' message='{payload} ({camera})' priority=5
+... INFO subscribed frigate/+/classification/Brama otwarta
+... INFO subscribed frigate/+/classification/Brama zamknieta
 ```
 
 ### 5c. Or deploy via SSH on VM B (no Portainer)
@@ -280,64 +299,52 @@ Listen to traffic. By default, **every topic on the broker** (`#` wildcard):
 $ ./scripts/sniff.sh
 sniffing <FRIGATE_HOST>:1883 topic=#  (Ctrl-C to stop)
 frigate/available online
-frigate/Podjazd/gate_open 0
 frigate/stats {"detection_fps": 0.0, ...}
-frigate/Podjazd/gate_open 1
-frigate/Podjazd/gate_open 0
+frigate/Podjazd/classification/Brama otwarta 1
+frigate/Podjazd/classification/Brama zamknieta 1
 ```
 
 Restrict by passing a topic pattern:
 
 ```
-./scripts/sniff.sh 'frigate/+/gate_open'   # all cameras, only gate_open
-./scripts/sniff.sh 'frigate/events'        # rich JSON event stream
-./scripts/sniff-frigate.sh                 # convenience: 'frigate/#'
+./scripts/sniff.sh 'frigate/+/classification/#'   # all classifications across cameras
+./scripts/sniff.sh 'frigate/events'               # rich JSON event stream
+./scripts/sniff-frigate.sh                        # convenience: 'frigate/#'
 ```
 
 MQTT wildcards: `#` matches any number of trailing topic segments; `+` matches exactly one segment. With no ACLs configured on Mosquitto, the bridge user can read everything, so `#` shows the entire broker.
 
 ### Spoof with `./scripts/spoof.sh`
 
-Publish a fake message as if Frigate had sent it. Usage: `spoof.sh <label> <camera> [count]` (count defaults to `1`):
+Publish a fake message as if Frigate had sent it. The full topic is passed verbatim — quote it if it contains spaces. Usage: `spoof.sh <topic> [payload]` (payload defaults to empty):
 
 ```
-./scripts/spoof.sh gate_open Podjazd 1     # raises edge → bridge pushes
-./scripts/spoof.sh gate_open Podjazd 0     # resets edge state, no push
-./scripts/spoof.sh gate_closed Podjazd 1
+./scripts/spoof.sh 'frigate/Podjazd/classification/Brama otwarta' 1
+./scripts/spoof.sh 'frigate/Podjazd/classification/Brama zamknieta' 1
+./scripts/spoof.sh frigate/Podjazd/gate_open 1
 ```
 
-The bridge logs whether it actually pushed, was suppressed by cooldown, or was treated as a seed:
+The bridge logs whether the message matched a forward and what got pushed (or why it was dropped):
 ```
-... INFO seeded Podjazd/gate_open=1 (no push on first message)
-... INFO pushed Brama otwarta for Podjazd
-... INFO cooldown suppressed gate_open for Podjazd (28.4s left)
+... INFO FORWARD_1 pushed: title='Brama' message='1 (Podjazd)' (topic=frigate/Podjazd/classification/Brama otwarta)
+... INFO FORWARD_2 dropped (value filter): topic=frigate/Podjazd/gate_open payload='0'
 ```
-
-### One-shot edge-and-cooldown exercise: `./scripts/spoof-cycle.sh`
-
-Sends `1`, then `0`, then `1` with 2 s sleeps. Exercises both rising-edge detection (first `1` should fire) and the 30 s cooldown (second `1` is within the window → suppressed):
-
-```
-./scripts/spoof-cycle.sh gate_open Podjazd
-```
-
-After a fresh bridge restart, the very first message for a `(camera,label)` pair only **seeds** state — it does not fire a push. So the first time you spoof after a restart, run it twice (or run `spoof-cycle.sh`, since the cycle starts with a `1` that becomes the seed and ends with a `1` that fires).
 
 ---
 
 ## Step 6 — End-to-end verification
 
-1. **Mosquitto reachable from VM B** — `./scripts/sniff.sh 'test/ping'` in one terminal, then in another: `./scripts/spoof.sh ping test 1` (which publishes to `frigate/test/ping` — close enough for a connectivity check) or just `mosquitto_pub -h <FRIGATE_HOST> -p 1883 -u bridge -P <BRIDGE_MQTT_PASS> -t test/ping -m hi`. The sniff terminal should print the message.
+1. **Mosquitto reachable from VM B** — in one terminal `./scripts/sniff.sh 'test/ping'`, in another `mosquitto_pub -h <FRIGATE_HOST> -p 1883 -u bridge -P <BRIDGE_MQTT_PASS> -t test/ping -m hi`. The sniff terminal should print the message.
 
-2. **Bridge subscribed** — VM B → **Containers → frigate-mqtt-bridge → Logs**. See `subscribed frigate/+/gate_open` and `subscribed frigate/+/gate_closed`.
+2. **Bridge parsed and subscribed** — VM B → **Containers → frigate-mqtt-bridge → Logs**. See `parsed N forwards` and one `subscribed <filter>` line per unique filter. If a slot has misconfigured env, you'll see `FORWARD_<N>_* defined without _TOPIC — skipping`.
 
-3. **Synthetic event** — `./scripts/spoof-cycle.sh gate_open Podjazd`. First `1` after a fresh bridge becomes the seed (no push); subsequent `0`-then-`1` should fire. If the bridge has been running for a while and already seeded, the very first `1` should fire. Phone push within ~1 s; bridge logs `pushed Brama otwarta for Podjazd`.
+3. **Synthetic event** — `./scripts/spoof.sh 'frigate/Podjazd/classification/Brama otwarta' 1`. Bridge logs `FORWARD_1 pushed: title='Brama' message='1 (Podjazd)'`. Phone push within ~1 s.
 
-4. **Cooldown works** — re-run `./scripts/spoof.sh gate_open Podjazd 0 && ./scripts/spoof.sh gate_open Podjazd 1` immediately after step 3. Bridge logs `cooldown suppressed gate_open for Podjazd (~28s left)`. Wait 30 s, repeat — push fires again.
+4. **Value filter** — if you've configured a slot with `FORWARD_<N>_VALUES`, publish a non-matching payload and confirm `FORWARD_<N> dropped (value filter)` in the logs (no push). Then publish a matching payload — push fires.
 
-5. **Real event** — physically move the gate, with `./scripts/sniff-frigate.sh` running in another terminal. Confirm the underlying topic traffic *and* the phone push.
+5. **Real event** — physically trigger the underlying detector (move the gate, etc.), with `./scripts/sniff-frigate.sh` running in another terminal. Confirm the underlying topic traffic *and* the phone push.
 
-6. **Restart safety** — **Containers → frigate-mqtt-bridge → Restart**. If the gate is currently open, no spurious push fires; the bridge logs `seeded Podjazd/gate_open=1 (no push on first message)`.
+6. **Restart safety** — **Containers → frigate-mqtt-bridge → Restart**. The bridge re-subscribes; no state to seed. If a topic you're subscribed to has retained messages, expect a push immediately on reconnect — classification topics aren't typically retained, but verify with `sniff` if in doubt.
 
 ---
 
@@ -367,6 +374,7 @@ In this repo: bridge sources, packaging, deploy compose, and debug scripts. The 
 - **Bridge on the Frigate VM instead** — collapse the cross-VM port. Move the stack to VM A, set `MQTT_HOST=mosquitto`, `GOTIFY_URL=http://<GOTIFY_HOST>:<port>`. Closes the firewall hole at the cost of an extra cross-VM hop per push (one short HTTP call instead of a persistent MQTT TCP session). Same image, different `.env`.
 - **TLS on MQTT** — for LAN-only it's optional; if it leaves the LAN, switch the listener to 8883 with a cert and add `tls_set` in the bridge.
 - **Multiple notification channels** — refactor `push()` into a list of dispatchers when there's a second sink (ntfy, Pushover, etc.). Don't generalize before two.
-- **Configurable cooldown / labels** — promote `COOLDOWN_S` and `LABELS` to env vars / a config file once you have a second gate or want to tune per-deployment.
+- **Per-forward cooldown / debounce** — currently every matched message fires a push. Add an opt-in `FORWARD_<N>_COOLDOWN_S` if a chatty topic produces too many notifications.
+- **Ignore retained messages** — opt-in `FORWARD_<N>_IGNORE_RETAINED=1` so a bridge restart doesn't replay retained state pushes.
 - **CI build & push** — GitHub Actions workflow that runs `make release` on tags. Avoids needing Docker on your dev box for releases.
 - **Drop the bridge entirely** — if/when Frigate gains native webhook notifications upstream, the bridge becomes redundant. Today (Frigate 0.16) it doesn't.

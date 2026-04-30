@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Publish a single message as if Frigate had sent it.
-# Usage: ./scripts/spoof.sh <label> <camera> [count]
-#   ./scripts/spoof.sh gate_open Podjazd 1
-#   ./scripts/spoof.sh gate_closed Podjazd 0
+# Publish a single message as if Frigate had sent it. Takes the full topic
+# verbatim, so quote it if it contains spaces (Frigate classification labels do).
+# Usage: ./scripts/spoof.sh <topic> [payload]
+#   ./scripts/spoof.sh 'frigate/Podjazd/classification/Brama otwarta' 1
+#   ./scripts/spoof.sh 'frigate/Podjazd/classification/Brama zamknieta' 1
+#   ./scripts/spoof.sh frigate/Podjazd/gate_open 1
 source "$(dirname "$0")/_lib.sh"
-LABEL="${1:?usage: spoof.sh <label> <camera> [count]}"
-CAMERA="${2:?usage: spoof.sh <label> <camera> [count]}"
-COUNT="${3:-1}"
-TOPIC="frigate/$CAMERA/$LABEL"
-echo "publish $TOPIC = $COUNT" >&2
+TOPIC="${1:?usage: spoof.sh <topic> [payload]}"
+PAYLOAD="${2-}"
+echo "publish $TOPIC = $PAYLOAD" >&2
 exec mosquitto_pub \
   -h "$MQTT_HOST" -p "$MQTT_PORT" \
   -u "$MQTT_USER" -P "$MQTT_PASS" \
-  -t "$TOPIC" -m "$COUNT"
+  -t "$TOPIC" -m "$PAYLOAD"

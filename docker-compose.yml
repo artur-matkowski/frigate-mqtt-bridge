@@ -7,12 +7,27 @@
 #     network = the *_default network the Gotify stack created
 #   - VM A (Frigate host): MQTT_HOST=mosquitto,      GOTIFY_URL=http://<GOTIFY_HOST>:<port>
 #     network = whatever shares with Mosquitto
+#
+# Forwards are configured via FORWARD_<N>_* env vars. You can keep them in
+# `.env` (loaded via env_file below) or inline them here under `environment:`
+# so Portainer users can edit them directly in the stack YAML. Compose merges
+# both; values in `environment:` win over `env_file`.
 services:
   bridge:
     image: ghcr.io/artur-matkowski/frigate-mqtt-bridge:latest
     container_name: frigate-mqtt-bridge
     restart: unless-stopped
     env_file: .env
+    # environment:
+    #   FORWARD_1_TOPIC: "frigate/+/classification/Brama otwarta,frigate/+/classification/Brama zamknieta"
+    #   FORWARD_1_TITLE: "Brama"
+    #   FORWARD_1_MESSAGE: "{payload} ({camera})"
+    #   # Optional value filter — only fires when payload is exactly "1":
+    #   # FORWARD_2_TOPIC: "frigate/+/gate_open"
+    #   # FORWARD_2_TITLE: "Brama"
+    #   # FORWARD_2_MESSAGE: "otwarta"
+    #   # FORWARD_2_VALUES: "1"
+    #   # FORWARD_2_PRIORITY: "5"
     networks:
       - gotify_default
 
