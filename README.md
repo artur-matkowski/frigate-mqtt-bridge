@@ -216,7 +216,7 @@ After a successful push, the image is at `ghcr.io/artur-matkowski/frigate-mqtt-b
 
 ### 5b. Create the stack in Portainer (VM B)
 
-**Stacks → Add stack → Web editor**, name `frigate-mqtt-bridge`. Paste the contents of this repo's `docker-compose.yml`:
+**Stacks → Add stack → Web editor**, name `frigate-mqtt-bridge`. Paste:
 
 ```yaml
 services:
@@ -224,30 +224,17 @@ services:
     image: ghcr.io/artur-matkowski/frigate-mqtt-bridge:latest
     container_name: frigate-mqtt-bridge
     restart: unless-stopped
-    env_file: .env
-    networks:
-      - gotify_default
-
-networks:
-  gotify_default:
-    external: true
+    environment:
+      MQTT_HOST: <FRIGATE_HOST>
+      MQTT_PORT: "1883"
+      MQTT_USER: bridge
+      MQTT_PASS: <BRIDGE_MQTT_PASS>
+      GOTIFY_URL: http://<GOTIFY_HOST>:<GOTIFY_PORT>
+      GOTIFY_TOKEN: <GOTIFY_TOKEN>
+      GOTIFY_PRIORITY: "5"
 ```
 
-In the Portainer stack form, scroll to **Environment variables** and add the values from `.env.example`:
-
-| name              | value                                                 |
-| ----------------- | ----------------------------------------------------- |
-| `MQTT_HOST`       | `<FRIGATE_HOST>`                                      |
-| `MQTT_PORT`       | `1883`                                                |
-| `MQTT_USER`       | `bridge`                                              |
-| `MQTT_PASS`       | `<BRIDGE_MQTT_PASS>`                                  |
-| `GOTIFY_URL`      | `http://gotify` (Gotify container name on its network) |
-| `GOTIFY_TOKEN`    | `<GOTIFY_TOKEN>`                                      |
-| `GOTIFY_PRIORITY` | `5`                                                   |
-
-(Portainer's stack-level env vars take the place of `env_file: .env` — the bridge reads them either way.)
-
-**Find the actual Gotify network name first**: **Networks** in Portainer on VM B → look for the network whose name ends in `_default` and has the Gotify container attached (commonly `gotify_default`). Substitute it in the compose above. The `GOTIFY_URL` value must resolve to the Gotify container's name on that network.
+Substitute the placeholders directly in the YAML before deploying. All connections are over LAN IPs — no Docker hostnames, no shared networks — so Compose's auto-created default network is enough and no `networks:` block is needed.
 
 **Private package?** If you didn't make the ghcr package public, the VM needs a one-time `docker login ghcr.io -u artur-matkowski` with a `read:packages`-scoped PAT. Public packages: nothing to set up.
 
