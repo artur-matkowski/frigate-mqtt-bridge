@@ -38,7 +38,7 @@ If you'd rather avoid SSH for `mosquitto.conf` too, put it in a git repo and use
 
 ## Prerequisites checklist
 
-- [ ] Frigate is publishing the topics you intend to forward (e.g. classification topics like `frigate/<camera>/classification/<label>`, or per-object topics like `frigate/<camera>/<label>`). Confirm with `./scripts/sniff-frigate.sh` before configuring forwards.
+- [ ] Frigate is publishing the topics you intend to forward. Classification models publish as `frigate/<camera>/classification/<model>` with the predicted label as the *payload*; legacy object-tracking publishes as `frigate/<camera>/<object>` with an integer count as the payload. Confirm with `./scripts/sniff-frigate.sh` before configuring forwards.
 - [ ] Portainer is reachable on both VMs and you can create stacks.
 - [ ] You know the LAN IPs — call them `FRIGATE_HOST` and `GOTIFY_HOST` below.
 - [ ] You can `ssh` (or SFTP) into both VMs to drop ~3 small files.
@@ -158,13 +158,15 @@ Disable "Auto-remove" so logs persist; **Deploy**. Open **Logs**, then walk past
 
 You should see your real Frigate topics, e.g.:
 ```
-frigate/Podjazd/classification/Brama otwarta 1
-frigate/Podjazd/classification/Brama zamknieta 1
-frigate/Podjazd/<some_label> 1
+frigate/Podjazd/classification/<MODEL> Brama otwarta
+frigate/Podjazd/classification/<MODEL> Brama zamknieta
+frigate/Podjazd/<some_object> 1
 ```
-If you only see `frigate/<camera>/all` and no per-label or per-classification topics, your detectors aren't firing the way you expect — fix that before proceeding. If you see no `frigate/...` topics at all, Frigate didn't connect to MQTT — re-check Step 2.
+For Frigate classification models the topic suffix is the **model name** and the payload is the **predicted label**. For legacy object tracking, the topic suffix is the **object name** and the payload is an **integer count**.
 
-**Write down the exact topic strings you see** — they go straight into `FORWARD_<N>_TOPIC` in Step 5. Topic segments may legitimately contain spaces (Frigate classification labels often do).
+If you only see `frigate/<camera>/all` and no per-object or per-classification topics, your detectors aren't firing the way you expect — fix that before proceeding. If you see no `frigate/...` topics at all, Frigate didn't connect to MQTT — re-check Step 2.
+
+**Write down the exact topic *and* payload strings you see** — the topic suffix (model or object name) goes into `FORWARD_<N>_TOPIC` in Step 5; the payload values you want to alert on go into `FORWARD_<N>_VALUES`.
 
 Stop and remove the smoke-test container when done.
 
@@ -234,10 +236,13 @@ services:
       GOTIFY_TOKEN: <GOTIFY_TOKEN>
       GOTIFY_PRIORITY: "5"
       # One forward slot per (set of) topic filter(s). N can be any integer.
-      FORWARD_1_TOPIC: "frigate/+/classification/Brama otwarta,frigate/+/classification/Brama zamknieta"
+      # Frigate classification: topic = frigate/<camera>/classification/<MODEL>,
+      # payload = predicted label. Put the model in _TOPIC, labels in _VALUES.
+      FORWARD_1_TOPIC: "frigate/+/classification/<MODEL>"
+      FORWARD_1_VALUES: "Brama otwarta,Brama zamknieta"
       FORWARD_1_TITLE: "Brama"
       FORWARD_1_MESSAGE: "{payload} ({camera})"
-      # Optional value filter — only fires when payload is exactly "1":
+      # Legacy object-tracking topic (count payload). Only fires on count "1":
       # FORWARD_2_TOPIC: "frigate/+/gate_open"
       # FORWARD_2_TITLE: "Brama"
       # FORWARD_2_MESSAGE: "otwarta"
@@ -248,8 +253,8 @@ services:
 Substitute the placeholders directly in the YAML before deploying. All connections are over LAN IPs — no Docker hostnames, no shared networks — so Compose's auto-created default network is enough and no `networks:` block is needed.
 
 Forward semantics:
-- `FORWARD_<N>_TOPIC` is comma-separated — one slot can subscribe to several filters (`+`/`#` wildcards allowed; spaces in segments are fine).
-- `FORWARD_<N>_VALUES` (optional, comma-separated) restricts forwarding to those exact payloads (after `strip()`). Unset = forward every payload.
+- `FORWARD_<N>_TOPIC` is comma-separated — one slot can subscribe to several filters (`+`/`#` wildcards allowed).
+- `FORWARD_<N>_VALUES` (optional, comma-separated) restricts forwarding to those exact payloads (after `strip()`). Unset = forward every payload. **For Frigate classifications the predicted label is the payload, so `_VALUES` is the correct place to whitelist labels** (`Brama otwarta`, etc.) — putting them in `_TOPIC` will never match.
 - `FORWARD_<N>_TITLE` / `FORWARD_<N>_MESSAGE` support `{topic}`, `{payload}`, `{camera}` placeholders. Defaults: `{topic}` and `{payload}`.
 - `FORWARD_<N>_PRIORITY` falls back to `GOTIFY_PRIORITY`.
 
@@ -258,9 +263,8 @@ Forward semantics:
 Click **Deploy the stack**. **Containers → frigate-mqtt-bridge → Logs** should show:
 ```
 ... INFO parsed 1 forwards
-... INFO   FORWARD_1 topics=['frigate/+/classification/Brama otwarta', 'frigate/+/classification/Brama zamknieta'] values=* title='Brama' message='{payload} ({camera})' priority=5
-... INFO subscribed frigate/+/classification/Brama otwarta
-... INFO subscribed frigate/+/classification/Brama zamknieta
+... INFO   FORWARD_1 topics=['frigate/+/classification/<MODEL>'] values=['Brama otwarta', 'Brama zamknieta'] title='Brama' message='{payload} ({camera})' priority=5
+... INFO subscribed frigate/+/classification/<MODEL>
 ```
 
 ### 5c. Or deploy via SSH on VM B (no Portainer)
@@ -300,8 +304,8 @@ $ ./scripts/sniff.sh
 sniffing <FRIGATE_HOST>:1883 topic=#  (Ctrl-C to stop)
 frigate/available online
 frigate/stats {"detection_fps": 0.0, ...}
-frigate/Podjazd/classification/Brama otwarta 1
-frigate/Podjazd/classification/Brama zamknieta 1
+frigate/Podjazd/classification/<MODEL> Brama otwarta
+frigate/Podjazd/classification/<MODEL> Brama zamknieta
 ```
 
 Restrict by passing a topic pattern:
@@ -316,18 +320,18 @@ MQTT wildcards: `#` matches any number of trailing topic segments; `+` matches e
 
 ### Spoof with `./scripts/spoof.sh`
 
-Publish a fake message as if Frigate had sent it. The full topic is passed verbatim — quote it if it contains spaces. Usage: `spoof.sh <topic> [payload]` (payload defaults to empty):
+Publish a fake message as if Frigate had sent it. The full topic is passed verbatim, and the payload is free-form — quote either if it contains spaces. Usage: `spoof.sh <topic> [payload]` (payload defaults to empty):
 
 ```
-./scripts/spoof.sh 'frigate/Podjazd/classification/Brama otwarta' 1
-./scripts/spoof.sh 'frigate/Podjazd/classification/Brama zamknieta' 1
+./scripts/spoof.sh 'frigate/Podjazd/classification/<MODEL>' 'Brama otwarta'
+./scripts/spoof.sh 'frigate/Podjazd/classification/<MODEL>' 'Brama zamknieta'
 ./scripts/spoof.sh frigate/Podjazd/gate_open 1
 ```
 
 The bridge logs whether the message matched a forward and what got pushed (or why it was dropped):
 ```
-... INFO FORWARD_1 pushed: title='Brama' message='1 (Podjazd)' (topic=frigate/Podjazd/classification/Brama otwarta)
-... INFO FORWARD_2 dropped (value filter): topic=frigate/Podjazd/gate_open payload='0'
+... INFO FORWARD_1 pushed: title='Brama' message='Brama otwarta (Podjazd)' (topic=frigate/Podjazd/classification/<MODEL>)
+... INFO FORWARD_1 dropped (value filter): topic=frigate/Podjazd/classification/<MODEL> payload='noise'
 ```
 
 ---
@@ -338,9 +342,9 @@ The bridge logs whether the message matched a forward and what got pushed (or wh
 
 2. **Bridge parsed and subscribed** — VM B → **Containers → frigate-mqtt-bridge → Logs**. See `parsed N forwards` and one `subscribed <filter>` line per unique filter. If a slot has misconfigured env, you'll see `FORWARD_<N>_* defined without _TOPIC — skipping`.
 
-3. **Synthetic event** — `./scripts/spoof.sh 'frigate/Podjazd/classification/Brama otwarta' 1`. Bridge logs `FORWARD_1 pushed: title='Brama' message='1 (Podjazd)'`. Phone push within ~1 s.
+3. **Synthetic event** — `./scripts/spoof.sh 'frigate/Podjazd/classification/<MODEL>' 'Brama otwarta'`. Bridge logs `FORWARD_1 pushed: title='Brama' message='Brama otwarta (Podjazd)'`. Phone push within ~1 s.
 
-4. **Value filter** — if you've configured a slot with `FORWARD_<N>_VALUES`, publish a non-matching payload and confirm `FORWARD_<N> dropped (value filter)` in the logs (no push). Then publish a matching payload — push fires.
+4. **Value filter** — `./scripts/spoof.sh 'frigate/Podjazd/classification/<MODEL>' 'noise'` should produce `FORWARD_1 dropped (value filter): ... payload='noise'` in the logs and **no** Gotify push. Then re-spoof with `'Brama zamknieta'` — push fires.
 
 5. **Real event** — physically trigger the underlying detector (move the gate, etc.), with `./scripts/sniff-frigate.sh` running in another terminal. Confirm the underlying topic traffic *and* the phone push.
 

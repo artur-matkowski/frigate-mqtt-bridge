@@ -19,10 +19,13 @@ services:
     restart: unless-stopped
     env_file: .env
     # environment:
-    #   FORWARD_1_TOPIC: "frigate/+/classification/Brama otwarta,frigate/+/classification/Brama zamknieta"
+    #   # Frigate classification: topic = frigate/<camera>/classification/<MODEL>,
+    #   # payload = predicted label. Put the model in _TOPIC, labels in _VALUES.
+    #   FORWARD_1_TOPIC: "frigate/+/classification/<MODEL>"
+    #   FORWARD_1_VALUES: "Brama otwarta,Brama zamknieta"
     #   FORWARD_1_TITLE: "Brama"
     #   FORWARD_1_MESSAGE: "{payload} ({camera})"
-    #   # Optional value filter — only fires when payload is exactly "1":
+    #   # Legacy object-tracking topic (count payload). Only fires on count "1":
     #   # FORWARD_2_TOPIC: "frigate/+/gate_open"
     #   # FORWARD_2_TITLE: "Brama"
     #   # FORWARD_2_MESSAGE: "otwarta"
